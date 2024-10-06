@@ -410,32 +410,21 @@ def _filter_by_name(
     """Filter candidates by name."""
     name_norm = _normalize_name(name)
 
+    def is_matching_candidate(candidate: MatchTargetsCandidate, name_norm: str) -> bool:
+        """Check if the candidate matches the given name or normalized name."""
+        if candidate.state.entity_id == name or _normalize_name(candidate.state.name) == name_norm:
+            return True
+        if candidate.entity and _normalize_name(candidate.entity.name) == name_norm:
+            return True
+        if candidate.entity and candidate.entity.aliases:
+            return any(_normalize_name(alias) == name_norm for alias in candidate.entity.aliases)
+        return False
+
     for candidate in candidates:
-        # Accept name or entity id
-        if (candidate.state.entity_id == name) or _normalize_name(
-            candidate.state.name
-        ) == name_norm:
+        if is_matching_candidate(candidate, name_norm):
             candidate.matched_name = name
             yield candidate
-            continue
 
-        if candidate.entity is None:
-            continue
-
-        if candidate.entity.name and (
-            _normalize_name(candidate.entity.name) == name_norm
-        ):
-            candidate.matched_name = name
-            yield candidate
-            continue
-
-        # Check aliases
-        if candidate.entity.aliases:
-            for alias in candidate.entity.aliases:
-                if _normalize_name(alias) == name_norm:
-                    candidate.matched_name = name
-                    yield candidate
-                    break
 
 
 def _filter_by_features(
