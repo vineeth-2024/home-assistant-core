@@ -309,12 +309,14 @@ class AmcrestChecker(ApiWrapper):
         assert self._unsub_recheck is not None
         self._unsub_recheck()
         self._unsub_recheck = None
-        _LOGGER.error("%s camera back online", self._wrap_name)
+        _LOGGER.info("%s camera back online", self._wrap_name)  # Log informational message
         self.available_flag.set()
         self.async_available_flag.set()
         async_dispatcher_send(
             self._hass, service_signal(SERVICE_UPDATE, self._wrap_name)
         )
+
+
 
     async def _wrap_test_online(self, now: datetime) -> None:
         """Test if camera is back online."""
@@ -369,136 +371,154 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     hass.data.setdefault(DATA_AMCREST, {DEVICES: {}, CAMERAS: []})
 
     for device in config[DOMAIN]:
-        name: str = device[CONF_NAME]
-        username: str = device[CONF_USERNAME]
-        password: str = device[CONF_PASSWORD]
-
-        api = AmcrestChecker(
-            hass, name, device[CONF_HOST], device[CONF_PORT], username, password
-        )
-
-        ffmpeg_arguments = device[CONF_FFMPEG_ARGUMENTS]
-        resolution = RESOLUTION_LIST[device[CONF_RESOLUTION]]
-        binary_sensors = device.get(CONF_BINARY_SENSORS)
-        sensors = device.get(CONF_SENSORS)
-        switches = device.get(CONF_SWITCHES)
-        stream_source = device[CONF_STREAM_SOURCE]
-        control_light = device.get(CONF_CONTROL_LIGHT)
-
-        # currently aiohttp only works with basic authentication
-        # only valid for mjpeg streaming
-        if device[CONF_AUTHENTICATION] == HTTP_BASIC_AUTHENTICATION:
-            authentication: aiohttp.BasicAuth | None = aiohttp.BasicAuth(
-                username, password
-            )
-        else:
-            authentication = None
-
-        hass.data[DATA_AMCREST][DEVICES][name] = AmcrestDevice(
-            api,
-            authentication,
-            ffmpeg_arguments,
-            stream_source,
-            resolution,
-            control_light,
-        )
-
-        hass.async_create_task(
-            discovery.async_load_platform(
-                hass, Platform.CAMERA, DOMAIN, {CONF_NAME: name}, config
-            )
-        )
-
-        event_codes = set()
-        if binary_sensors:
-            hass.async_create_task(
-                discovery.async_load_platform(
-                    hass,
-                    Platform.BINARY_SENSOR,
-                    DOMAIN,
-                    {CONF_NAME: name, CONF_BINARY_SENSORS: binary_sensors},
-                    config,
-                )
-            )
-            event_codes = {
-                event_code
-                for sensor in BINARY_SENSORS
-                if sensor.key in binary_sensors
-                and not sensor.should_poll
-                and sensor.event_codes is not None
-                for event_code in sensor.event_codes
-            }
-
-        _start_event_monitor(hass, name, api, event_codes)
-
-        if sensors:
-            hass.async_create_task(
-                discovery.async_load_platform(
-                    hass,
-                    Platform.SENSOR,
-                    DOMAIN,
-                    {CONF_NAME: name, CONF_SENSORS: sensors},
-                    config,
-                )
-            )
-
-        if switches:
-            hass.async_create_task(
-                discovery.async_load_platform(
-                    hass,
-                    Platform.SWITCH,
-                    DOMAIN,
-                    {CONF_NAME: name, CONF_SWITCHES: switches},
-                    config,
-                )
-            )
+        await _setup_device(hass, device, config)  # Moved logic into _setup_device helper function
 
     if not hass.data[DATA_AMCREST][DEVICES]:
         return False
 
-    def have_permission(user: User | None, entity_id: str) -> bool:
-        return not user or user.permissions.check_entity(entity_id, POLICY_CONTROL)
+    _register_services(hass)  # Moved services registration logic into _register_services helper function
 
-    async def async_extract_from_service(call: ServiceCall) -> list[str]:
-        if call.context.user_id:
-            user = await hass.auth.async_get_user(call.context.user_id)
-            if user is None:
-                raise UnknownUser(context=call.context)
-        else:
-            user = None
+    return True
 
-        if call.data.get(ATTR_ENTITY_ID) == ENTITY_MATCH_ALL:
-            # Return all entity_ids user has permission to control.
-            return [
-                entity_id
-                for entity_id in hass.data[DATA_AMCREST][CAMERAS]
-                if have_permission(user, entity_id)
-            ]
 
-        if call.data.get(ATTR_ENTITY_ID) == ENTITY_MATCH_NONE:
-            return []
+async def _setup_device(hass: HomeAssistant, device: dict, config: ConfigType) -> None:
+    """Set up a single Amcrest device."""
+    name = device[CONF_NAME]
+    username = device[CONF_USERNAME]
+    password = device[CONF_PASSWORD]
 
-        call_ids = await async_extract_entity_ids(hass, call)
-        entity_ids = []
-        for entity_id in hass.data[DATA_AMCREST][CAMERAS]:
-            if entity_id not in call_ids:
-                continue
-            if not have_permission(user, entity_id):
-                raise Unauthorized(
-                    context=call.context, entity_id=entity_id, permission=POLICY_CONTROL
-                )
-            entity_ids.append(entity_id)
-        return entity_ids
+    api = AmcrestChecker(
+        hass, name, device[CONF_HOST], device[CONF_PORT], username, password
+    )
+
+    hass.data[DATA_AMCREST][DEVICES][name] = AmcrestDevice(
+        api,
+        _get_authentication(device, username, password),
+        device[CONF_FFMPEG_ARGUMENTS],
+        device[CONF_STREAM_SOURCE],
+        RESOLUTION_LIST[device[CONF_RESOLUTION]],
+        device.get(CONF_CONTROL_LIGHT),
+    )
+
+    await _load_platforms(hass, name, device, config)  # Calls another helper for platform setup
+    _start_event_monitor(hass, name, api, _get_event_codes(device))  # Calls event monitor helper
+
+
+def _get_authentication(device: dict, username: str, password: str) -> aiohttp.BasicAuth | None:
+    """Get authentication for the device."""
+    if device[CONF_AUTHENTICATION] == HTTP_BASIC_AUTHENTICATION:
+        return aiohttp.BasicAuth(username, password)
+    return None
+
+
+async def _load_platforms(hass: HomeAssistant, name: str, device: dict, config: ConfigType) -> None:
+    """Load necessary platforms for the device."""
+    await hass.async_create_task(
+        discovery.async_load_platform(hass, Platform.CAMERA, DOMAIN, {CONF_NAME: name}, config)
+    )
+
+    if binary_sensors := device.get(CONF_BINARY_SENSORS):
+        await hass.async_create_task(
+            discovery.async_load_platform(
+                hass,
+                Platform.BINARY_SENSOR,
+                DOMAIN,
+                {CONF_NAME: name, CONF_BINARY_SENSORS: binary_sensors},
+                config,
+            )
+        )
+
+    if sensors := device.get(CONF_SENSORS):
+        await hass.async_create_task(
+            discovery.async_load_platform(
+                hass,
+                Platform.SENSOR,
+                DOMAIN,
+                {CONF_NAME: name, CONF_SENSORS: sensors},
+                config,
+            )
+        )
+
+    if switches := device.get(CONF_SWITCHES):
+        await hass.async_create_task(
+            discovery.async_load_platform(
+                hass,
+                Platform.SWITCH,
+                DOMAIN,
+                {CONF_NAME: name, CONF_SWITCHES: switches},
+                config,
+            )
+        )
+
+
+def _get_event_codes(device: dict) -> set[str]:
+    """Get event codes for the device."""
+    if binary_sensors := device.get(CONF_BINARY_SENSORS):
+        return {
+            event_code
+            for sensor in BINARY_SENSORS
+            if sensor.key in binary_sensors
+            and not sensor.should_poll
+            and sensor.event_codes is not None
+            for event_code in sensor.event_codes
+        }
+    return set()
+
+
+def _register_services(hass: HomeAssistant) -> None:
+    """Register services for the component."""
+    for service, params in CAMERA_SERVICES.items():
+        hass.services.async_register(
+            DOMAIN, service, _create_service_handler(hass), params[0]
+        )
+
+
+def _create_service_handler(hass: HomeAssistant) -> Callable[[ServiceCall], Awaitable[None]]:
+    """Create a service handler for the component."""
 
     async def async_service_handler(call: ServiceCall) -> None:
         args = [call.data[arg] for arg in CAMERA_SERVICES[call.service][2]]
-        for entity_id in await async_extract_from_service(call):
+        for entity_id in await _extract_entity_ids_from_service(hass, call):
             async_dispatcher_send(hass, service_signal(call.service, entity_id), *args)
 
-    for service, params in CAMERA_SERVICES.items():
-        hass.services.async_register(DOMAIN, service, async_service_handler, params[0])
+    return async_service_handler
 
-    return True
+
+async def _extract_entity_ids_from_service(hass: HomeAssistant, call: ServiceCall) -> list[str]:
+    """Extract entity IDs from a service call."""
+    user = await _get_user(hass, call)
+
+    if call.data.get(ATTR_ENTITY_ID) == ENTITY_MATCH_ALL:
+        return [
+            entity_id
+            for entity_id in hass.data[DATA_AMCREST][CAMERAS]
+            if _has_permission(user, entity_id)
+        ]
+
+    if call.data.get(ATTR_ENTITY_ID) == ENTITY_MATCH_NONE:
+        return []
+
+    call_ids = await async_extract_entity_ids(hass, call)
+    return [
+        entity_id
+        for entity_id in hass.data[DATA_AMCREST][CAMERAS]
+        if entity_id in call_ids and _has_permission(user, entity_id)
+    ]
+
+
+async def _get_user(hass: HomeAssistant, call: ServiceCall) -> User | None:
+    """Get the user associated with a service call."""
+    if call.context.user_id:
+        user = await hass.auth.async_get_user(call.context.user_id)
+        if user is None:
+            raise UnknownUser(context=call.context)
+        return user
+    return None
+
+
+def _has_permission(user: User | None, entity_id: str) -> bool:
+    """Check if a user has permission to control an entity."""
+    return not user or user.permissions.check_entity(entity_id, POLICY_CONTROL)
 
 
 @dataclass
@@ -512,3 +532,4 @@ class AmcrestDevice:
     resolution: int
     control_light: bool
     channel: int = 0
+
