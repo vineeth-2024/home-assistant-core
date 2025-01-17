@@ -1217,3 +1217,35 @@ class SingleCoordinatorWeatherEntity(
         self.coordinator.config_entry.async_create_task(
             self.hass, self.async_update_listeners(None)
         )
+
+import requests
+from homeassistant.helpers.entity import Entity
+class OpenWeatherEntity(Entity):
+    """Representation of a weather entity."""
+
+    def init(self, hass, api_key, city):
+        """Initialize the weather entity."""
+        self.hass = hass
+        self.api_key = api_key
+        self.city = city
+        self._state = None
+        self._temperature = None
+
+    @property
+    def state(self):
+        return self._state
+
+    @property
+    def extra_state_attributes(self):
+        return {"temperature": self._temperature}
+    
+    async def async_update(self):
+        """Fetch weather data from OpenWeatherMap API."""
+        url = f"http://api.openweathermap.org/data/2.5/weather?q={self.city}&appid={self.api_key}&units=metric"
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            self._state = data.get("weather", [{}])[0].get("description", "Unknown")
+            self._temperature = data.get("main", {}).get("temp", None)
+        else:
+            self._state = "Error"

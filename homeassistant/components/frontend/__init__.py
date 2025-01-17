@@ -851,3 +851,4 @@ class PanelRespons(TypedDict):
     url_path: str | None
     require_admin: bool
     config_panel_domain: str | None
+
